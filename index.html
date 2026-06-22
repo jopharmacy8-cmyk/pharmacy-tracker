@@ -1392,11 +1392,11 @@
       const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML;
     }
 
-    function pendingProducts() { return state.products.filter(p => !state.images[p.id]); }
+    function pendingProducts() { return state.products.filter(p => !state.images[p.id] && !p.cloudinaryUrl); }
 
     function completedProducts() {
       const q = state.searchQuery.toLowerCase().trim();
-      let list = state.products.filter(p => state.images[p.id]);
+      let list = state.products.filter(p => state.images[p.id] || p.cloudinaryUrl);
       if (q) list = list.filter(p =>
         p.name.toLowerCase().includes(q) || p.size.toLowerCase().includes(q) || p.code.toLowerCase().includes(q));
       return [...list].sort((a, b) => {
@@ -1420,7 +1420,7 @@
 
     function updatePills() {
       const p = pendingProducts().length;
-      const c = state.products.filter(x => state.images[x.id]).length;
+      const c = state.products.filter(x => state.images[x.id] || x.cloudinaryUrl).length;
       document.getElementById('pill-pending').textContent   = p;
       document.getElementById('pill-completed').textContent = c;
       document.getElementById('pending-count').textContent  = p;
@@ -1499,7 +1499,10 @@
         render();
         switchTab('completed');
         showToast('✓ Successfully Captured!', `"${p?.name}" moved to Completed`, 'success');
-        if (p) uploadToCloudinary(p.code, p.name, d);
+        if (p) {
+          const url = await uploadToCloudinary(p.code, p.name, d);
+          if (url) { p.cloudinaryUrl = url; saveProducts(); }
+        }
       } catch {
         showToast('✕ Save Failed', 'Could not save the photo — please try again', 'error');
       }
@@ -1526,7 +1529,7 @@
         <div class="completed-card">
           <div class="c-img-wrap">
             <span class="c-done-badge">✓ Done</span>
-            <img class="c-img" src="${state.images[p.id]}" alt="${esc(p.name)}" loading="lazy" />
+            <img class="c-img" src="${state.images[p.id] || p.cloudinaryUrl}" alt="${esc(p.name)}" loading="lazy" />
           </div>
           <div class="c-info">
             <div class="c-name">${esc(p.name)}</div>
@@ -1629,7 +1632,9 @@
         try {
           await idbPut(id, state.formPhoto);
           state.images[id] = state.formPhoto;
-          uploadToCloudinary(code, name, state.formPhoto);
+          uploadToCloudinary(code, name, state.formPhoto).then(url => {
+            if (url) { const p2 = state.products.find(x => x.code === code); if (p2) { p2.cloudinaryUrl = url; saveProducts(); } }
+          });
         } catch {
           showToast('✕ Photo Save Failed', 'Product added but photo could not be saved', 'error');
         }
@@ -1760,9 +1765,13 @@
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
           showToast('⚠ Cloud Backup Failed', err?.error?.message || 'Photo saved locally only', 'error');
+          return null;
         }
+        const data = await res.json();
+        return data.secure_url || null;
       } catch(e) {
         showToast('⚠ Cloud Backup Failed', 'Check your internet connection', 'error');
+        return null;
       }
     }
 
@@ -1970,7 +1979,10 @@
           const p = state.products.find(x => x.id === id);
           render();
           showToast('✓ Photo Updated', `"${p?.name}" photo replaced`, 'success');
-          if (p) uploadToCloudinary(p.code, p.name, d);
+          if (p) {
+          const url = await uploadToCloudinary(p.code, p.name, d);
+          if (url) { p.cloudinaryUrl = url; saveProducts(); }
+        }
         } catch {
           showToast('✕ Failed', 'Could not update the photo — please try again', 'error');
         }
