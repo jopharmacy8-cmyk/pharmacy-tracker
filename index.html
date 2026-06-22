@@ -7,7 +7,6 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
     /* ══════════════════════════════════════════════════════
        TOKENS
@@ -1253,12 +1252,6 @@
     }
 
     const LS_KEY   = 'pharma_v6_products';
-
-    /* ── SUPABASE ──────────────────────────────────────── */
-    const SB_URL  = 'https://imsfvtehejouylsayvvv.supabase.co';
-    const SB_KEY  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imltc2Z2dGVoZWpvdXlsc2F5dnZ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIwNTY5MzgsImV4cCI6MjA5NzYzMjkzOH0.4CdXfvIu6MPVoZ9dgMSZzz0C5tIUw-S7MM1p6GXfVuQ';
-    let sb = null;
-    try { sb = supabase.createClient(SB_URL, SB_KEY); } catch(e) { console.error("Supabase init failed:", e); }
     const IDB_NAME = 'PharmacyV6';
     const IDB_VER  = 1;
     const IDB_STR  = 'images';
@@ -1324,40 +1317,51 @@
       });
     }
 
-    /* ── STORAGE (localStorage cache + Supabase sync) ─── */
+    /* ── SUPABASE (lazy-loaded so lock screen always works) ─ */
+    const SB_URL = 'https://imsfvtehejouylsayvvv.supabase.co';
+    const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imltc2Z2dGVoZWpvdXlsc2F5dnZ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIwNTY5MzgsImV4cCI6MjA5NzYzMjkzOH0.4CdXfvIu6MPVoZ9dgMSZzz0C5tIUw-S7MM1p6GXfVuQ';
+    let sb = null;
+
+    function initSupabase() {
+      return new Promise((resolve) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
+        s.onload = () => {
+          try { sb = supabase.createClient(SB_URL, SB_KEY); } catch(e) { console.error('Supabase init failed:', e); }
+          resolve();
+        };
+        s.onerror = () => resolve();
+        document.head.appendChild(s);
+      });
+    }
+
+    /* ── STORAGE (localStorage cache + Supabase cloud sync) ─ */
     async function loadProducts() {
-      if (!sb) { try { const r = localStorage.getItem(LS_KEY); if (r) state.products = JSON.parse(r); } catch {} return; }
-      // Try Supabase first (cloud truth)
-      try {
-        const { data, error } = await sb.from('products').select('data');
-        if (!error && data) {
-          state.products = data.map(r => r.data);
-          try { localStorage.setItem(LS_KEY, JSON.stringify(state.products)); } catch {}
-          return;
-        }
-      } catch {}
-      // Fallback to localStorage if offline
+      if (sb) {
+        try {
+          const { data, error } = await sb.from('products').select('data');
+          if (!error && data) {
+            state.products = data.map(r => r.data);
+            try { localStorage.setItem(LS_KEY, JSON.stringify(state.products)); } catch {}
+            return;
+          }
+        } catch {}
+      }
       try { const r = localStorage.getItem(LS_KEY); if (r) state.products = JSON.parse(r); } catch {}
     }
     function saveProducts() {
-      // Save to localStorage immediately (instant)
       try { localStorage.setItem(LS_KEY, JSON.stringify(state.products)); } catch {}
-      // Sync to Supabase in background
-      syncToSupabase();
+      if (sb) syncToSupabase();
     }
     async function syncToSupabase() {
-      if (!sb) return;
       try {
-        // Delete all existing rows then insert current list
         await sb.from('products').delete().neq('code', '');
         if (state.products.length > 0) {
           await sb.from('products').insert(
             state.products.map(p => ({ code: p.code, name: p.name, data: p }))
           );
         }
-      } catch (e) {
-        console.error('Supabase sync failed:', e.message);
-      }
+      } catch(e) { console.error('Supabase sync failed:', e.message); }
     }
 
     /* ── IMAGE COMPRESSION ─────────────────────────────── */
@@ -1721,7 +1725,7 @@
       if (!confirm('⚠️ Delete ALL products and photos?\n\nThis action cannot be undone.')) return;
       await idbClear(); state.products = []; state.images = {};
       localStorage.removeItem(LS_KEY);
-      try { await sb.from('products').delete().neq('code', ''); } catch {}
+      if (sb) { try { await sb.from('products').delete().neq('code', ''); } catch {} }
       clearForm(); render();
       showToast('🗑 Reset Complete', 'All data has been cleared', 'info');
     }
@@ -1954,4 +1958,48 @@
       });
 
       document.getElementById('change-photo-input').addEventListener('change', async e => {
-        const id = e.ta
+        const id = e.target.dataset.targetId;
+        const f  = e.target.files[0];
+        if (!f || !id) return;
+        e.target.value = '';
+        try {
+          showToast('⏳ Updating…', 'Compressing and saving new photo', 'info');
+          const d = await compress(f);
+          await idbPut(id, d);
+          state.images[id] = d;
+          const p = state.products.find(x => x.id === id);
+          render();
+          showToast('✓ Photo Updated', `"${p?.name}" photo replaced`, 'success');
+          if (p) uploadToCloudinary(p.code, p.name, d);
+        } catch {
+          showToast('✕ Failed', 'Could not update the photo — please try again', 'error');
+        }
+      });
+
+      ['edit-name','edit-size','edit-code'].forEach(id =>
+        document.getElementById(id).addEventListener('keydown', e => {
+          if (e.key === 'Enter') saveEdit();
+        }));
+    }
+
+    /* ── INIT ──────────────────────────────────────────── */
+    async function init() {
+      await initSupabase();
+      try {
+        idb = await openIDB();
+        await loadProducts();
+        state.images = await idbLoadAll();
+      } catch (err) {
+        console.error('IndexedDB unavailable:', err);
+        await loadProducts();
+        showToast('⚠ Storage Warning', 'Photos may not persist after browser refresh', 'warning');
+      }
+      bindEvents();
+      await seedIfEmpty();
+      render();
+    }
+
+    document.addEventListener('DOMContentLoaded', () => { initLock(); init(); });
+  </script>
+</body>
+</html>
